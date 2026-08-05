@@ -1075,6 +1075,10 @@ def _build_child_agent(
     model on OpenRouter while the parent runs on Nous Portal).
     """
     from run_agent import AIAgent
+    from agent.session_write_policy import (
+        SessionWritePolicy,
+        get_current_session_write_policy,
+    )
     import uuid as _uuid
 
     # ── Role resolution ─────────────────────────────────────────────────
@@ -1316,6 +1320,13 @@ def _build_child_agent(
     child_optional_kwargs: Dict[str, Any] = {}
     if isinstance(child_max_tokens, int):
         child_optional_kwargs["max_tokens"] = child_max_tokens
+    parent_policy = getattr(parent_agent, "session_write_policy", None)
+    if not isinstance(parent_policy, SessionWritePolicy):
+        parent_policy = get_current_session_write_policy(
+            session_id=getattr(parent_agent, "session_id", "") or "",
+            protected=False,
+        )
+    child_policy = parent_policy.derive_child(None)
 
     child = AIAgent(
         base_url=effective_base_url,
@@ -1355,6 +1366,7 @@ def _build_child_agent(
         openrouter_min_coding_score=child_openrouter_min_coding_score,
         tool_progress_callback=child_progress_cb,
         iteration_budget=None,  # fresh budget per subagent
+        session_write_policy=child_policy,
         **child_optional_kwargs,
     )
     child._print_fn = getattr(parent_agent, "_print_fn", None)
