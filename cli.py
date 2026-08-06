@@ -8509,7 +8509,13 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                 cc = ChatConsole()
                 term_w = shutil.get_terminal_size().columns
                 if self.compact or term_w < 80:
-                    cc.print(_build_compact_banner())
+                    # Inside the TUI, ChatConsole.print() routes each rendered
+                    # line through _cprint which records into _OUTPUT_HISTORY.
+                    # The compact banner is a one-shot UI repaint, not user
+                    # content — suppress history recording so a subsequent
+                    # redraw doesn't replay the banner on top of fresh output.
+                    with _suspend_output_history():
+                        cc.print(_build_compact_banner())
                 else:
                     tools = get_tool_definitions(enabled_toolsets=self.enabled_toolsets, quiet_mode=True)
                     cwd = os.getenv("TERMINAL_CWD", os.getcwd())
