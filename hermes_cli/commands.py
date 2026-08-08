@@ -159,6 +159,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("goal", "Set a standing goal Hermes works on across turns until achieved", "Session",
                args_hint="[text | draft <text> | show | gate add <cmd> | pause | resume | clear | status | wait <pid> | unwait]",
                busy_policy="dispatch", busy_handler="goal"),
+    CommandDef("objective", "Preview an Executive v2 objective plan without persisting or executing it", "Session",
+               args_hint="[--dry-run] <objective>"),
     CommandDef("heartbeat", "Set a recurring prompt that re-enters this session when idle", "Session",
                aliases=("hb",), args_hint="[every <interval> <prompt> | status | pause | resume | clear]",
                subcommands=("status", "pause", "resume", "clear"),
@@ -1272,7 +1274,7 @@ _SLACK_PRIORITY_ALIASES = ("btw", "bg")
 #   - refine: on-demand memory/skill review; reached via /hermes refine on
 #     Slack. Added at the 50-cap — a native slot would clamp an existing
 #     native slash.
-_SLACK_VIA_HERMES_ONLY = frozenset({"topup", "moa", "debug", "egress", "init", "version", "diff", "update", "heartbeat", "refine"})
+_SLACK_VIA_HERMES_ONLY = frozenset({"topup", "moa", "debug", "egress", "init", "version", "diff", "update", "heartbeat", "refine", "objective"})
 
 
 def _sanitize_slack_name(raw: str) -> str:
