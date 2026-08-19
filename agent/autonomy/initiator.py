@@ -160,6 +160,12 @@ def attempt_autonomous_initiation(
                     # default, no MiniMax hardcoding, no config lookup.
                     model_override=objective_spec.get("model_override"),
                     provider_override=objective_spec.get("provider_override"),
+                    # V2: STRICT-READONLY Kanban worker capability flag,
+                    # opt-in from the objective spec only. Default is
+                    # False (writable). Never inferred from
+                    # ``created_by == "autonomous_initiator"`` —
+                    # provenance is NOT capability.
+                    strict_readonly=objective_spec.get("strict_readonly"),
                 )
     except sqlite3.IntegrityError as e:
         # Race: another caller created the same idempotency_key between
