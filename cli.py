@@ -4291,6 +4291,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         checkpoints: bool = False,
         pass_session_id: bool = False,
         ignore_rules: bool = False,
+        skip_background_review: bool = False,
     ):
         """
         Initialize the Hermes CLI.
@@ -4547,6 +4548,14 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         # pass skip_context_files=True and skip_memory=True to AIAgent so
         # AGENTS.md/SOUL.md/.cursorrules and persistent memory are not loaded.
         self.ignore_rules = ignore_rules or os.environ.get("HERMES_IGNORE_RULES") == "1"
+        # --skip-background-review: per-invocation flag forwarded from
+        # `hermes chat --skip-background-review` in hermes_cli/main.py. When
+        # True, AIAgent(skip_background_review=True) is constructed and the
+        # Scope-A central guard in AIAgent._spawn_background_review refuses
+        # automatic post-turn review. Composes with the existing kanban-derived
+        # source via OR in cli_agent_setup_mixin.py:_init_agent. Single-
+        # invocation only — no env-var, no config.yaml, no profile persistence.
+        self.skip_background_review = bool(skip_background_review)
         
         # Ephemeral system prompt: env var takes precedence, then
         # display.personality / agent.system_prompt from config.
@@ -18203,6 +18212,7 @@ def main(
     pass_session_id: bool = False,
     ignore_user_config: bool = False,
     ignore_rules: bool = False,
+    skip_background_review: bool = False,
 ):
     """
     Hermes Agent CLI - Interactive AI Assistant
@@ -18340,6 +18350,7 @@ def main(
         checkpoints=checkpoints,
         pass_session_id=pass_session_id,
         ignore_rules=ignore_rules,
+        skip_background_review=skip_background_review,
     )
 
     if parsed_skills:

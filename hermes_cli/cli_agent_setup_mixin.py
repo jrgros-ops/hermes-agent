@@ -14,6 +14,7 @@ loaded) so this module never imports ``cli`` at import time -> no import cycle.
 
 from __future__ import annotations
 
+import os
 import sys
 
 from rich.markup import escape as _escape
@@ -524,6 +525,18 @@ class CLIAgentSetupMixin:
                 pass_session_id=self.pass_session_id,
                 skip_context_files=self.ignore_rules,
                 skip_memory=self.ignore_rules,
+                # V1.3-B: Kanban-spawned workers run as a deterministic
+                # ``chat -q`` single-turn with a hard iteration budget (90) but
+                # a skill-nudge threshold of 10. Without this suppression the
+                # post-turn background-review fork could fire and mutate the
+                # skill library mid-task. The canonical dispatcher already
+                # pins the worker provenance via ``HERMES_SESSION_SOURCE``;
+                # honour it here so the safety property does not depend on
+                # the worker staying below the nudge interval.
+                skip_background_review=(
+                    os.environ.get("HERMES_SESSION_SOURCE") == "kanban"
+                    or getattr(self, "skip_background_review", False)
+                ),
                 tool_progress_callback=self._on_tool_progress,
                 tool_start_callback=self._on_tool_start if self._inline_diffs_enabled else None,
                 tool_complete_callback=self._on_tool_complete if self._inline_diffs_enabled else None,
