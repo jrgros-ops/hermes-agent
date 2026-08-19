@@ -849,6 +849,12 @@ def run_codex_app_server_turn(
         turn.final_text
         and not turn.interrupted
         and (should_review_memory or should_review_skills)
+        # Defense-in-depth mirror of agent/turn_finalizer.py:756 so a
+        # codex-runtime turn with skip_background_review=True (cron,
+        # kanban worker, future strict-readonly V2) never reaches the
+        # central choke point in the first place. Central gate in
+        # AIAgent._spawn_background_review remains authoritative.
+        and not getattr(agent, "skip_background_review", False)
     ):
         try:
             agent._spawn_background_review(

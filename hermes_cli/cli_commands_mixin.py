@@ -2499,11 +2499,16 @@ class CLICommandsMixin:
 
         review_skills = "skill_manage" in getattr(agent, "valid_tool_names", set())
         try:
+            # Explicit /refine: skip_background_review is the canonical
+            # automatic-post-turn suppression flag and does NOT bind
+            # user-triggered /refine. automatic=False opts out of the
+            # central fail-safe guard.
             agent._spawn_background_review(
                 messages_snapshot=snapshot,
                 review_memory=True,
                 review_skills=review_skills,
                 focus=focus or None,
+                automatic=False,
             )
         except Exception as exc:
             _cprint(f"  /refine failed to start: {exc}")

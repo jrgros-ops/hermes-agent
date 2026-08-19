@@ -1804,6 +1804,7 @@ class AIAgent:
         review_memory: bool = False,
         review_skills: bool = False,
         focus: Optional[str] = None,
+        automatic: bool = True,
     ) -> None:
         """Spawn the background memory/skill review thread.
 
@@ -1816,7 +1817,21 @@ class AIAgent:
         ``focus`` is optional user-supplied steering (from ``/refine``)
         appended to the review prompt — e.g. "save the deploy workflow as a
         skill". The automatic post-turn triggers never set it.
+
+        ``automatic`` defaults to True so this choke point fails SAFE:
+        every current/future caller of this method without an explicit
+        ``automatic=False`` override is treated as an automatic post-turn
+        spawn and refused when ``agent.skip_background_review`` is True.
+        The two existing explicit /refine callers pass ``automatic=False``
+        to preserve their user-driven, focus-annotated semantics on
+        agents whose constructor opted into background-review suppression.
         """
+        # Central, entrypoint-independent enforcement — fails SAFE by
+        # default so an existing automatic caller that forgets to update
+        # also benefits from the gate, and a future caller added without
+        # thought inherits the existing skip_background_review semantics.
+        if automatic and getattr(self, "skip_background_review", False):
+            return None
         from agent.background_review import spawn_background_review_thread
         from tools.thread_context import propagate_context_to_thread
         target, _prompt = spawn_background_review_thread(
