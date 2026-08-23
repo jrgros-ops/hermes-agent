@@ -37,6 +37,10 @@ import yaml
 from tools.skills_guard import (
     ScanResult, content_hash, TRUSTED_REPOS,
 )
+from tools.skill_publish_guard import (
+    SkillMutationLockAcquireFailure,
+    live_skill_publish_guard,
+)
 from tools.url_safety import is_safe_url
 from tools.website_policy import check_website_access
 
@@ -3750,101 +3754,113 @@ def install_from_quarantine(
             )
         ancestor = ancestor.parent
 
-    if install_dir.exists():
-        if not install_dir.is_dir():
-            # A stray regular file at the install path. rmtree() on a file
-            # raises NotADirectoryError (an uncaught traceback at the CLI);
-            # refuse with the same actionable ValueError contract instead.
-            raise ValueError(
-                f"Refusing to install: '{install_dir.name}' already exists "
-                f"and is not a directory. Remove it or choose a different "
-                f"skill name."
-            )
-        # Guard against silent data loss when the install target collides with
-        # an existing category bucket (a directory that holds other skills).
-        # This was reported as GitHub issue #75983: installing a skill with
-        # --name matching an existing category directory caused rmtree to wipe
-        # all sibling skills.  A directory that directly contains SKILL.md is
-        # an existing skill installation and stays overwritable (hub-installed
-        # skills are additionally guarded by the lock-file check in
-        # do_install()).  But a directory that contains *other* skill
-        # directories is a category bucket and must NOT be silently deleted.
-        if not (install_dir / "SKILL.md").exists():
-            skill_dirs_in = _category_skill_dirs(install_dir)
-            if skill_dirs_in:
+    # P3 wiring -- A1G: protect the hub install under the shared
+    # normalized-name lock + per-target lock. replacement_policy
+    # "replace_same_target" allows the documented same-target
+    # overwrite path (an existing hub-installed skill being
+    # re-installed with a newer version). The guard's authoritative
+    # scan #2 inside the locked region still refuses DIFFERENT-PATH
+    # SAME-NAME installs and CROSS-ROOT SAME-NAME installs.
+    with live_skill_publish_guard(
+        safe_skill_name,
+        target=install_dir,
+        replacement_policy="replace_same_target",
+    ):
+        if install_dir.exists():
+            if not install_dir.is_dir():
+                # A stray regular file at the install path. rmtree() on a file
+                # raises NotADirectoryError (an uncaught traceback at the CLI);
+                # refuse with the same actionable ValueError contract instead.
                 raise ValueError(
-                    f"Refusing to overwrite category directory '{install_dir}' "
-                    f"which contains {len(skill_dirs_in)} skill(s): "
-                    f"{', '.join(sorted(skill_dirs_in))}. "
-                    f"Use a different --name or install into a subcategory."
+                    f"Refusing to install: '{install_dir.name}' already exists "
+                    f"and is not a directory. Remove it or choose a different "
+                    f"skill name."
                 )
-        shutil.rmtree(install_dir)
+            # Guard against silent data loss when the install target collides with
+            # an existing category bucket (a directory that holds other skills).
+            # This was reported as GitHub issue #75983: installing a skill with
+            # --name matching an existing category directory caused rmtree to wipe
+            # all sibling skills.  A directory that directly contains SKILL.md is
+            # an existing skill installation and stays overwritable (hub-installed
+            # skills are additionally guarded by the lock-file check in
+            # do_install()).  But a directory that contains *other* skill
+            # directories is a category bucket and must NOT be silently deleted.
+            if not (install_dir / "SKILL.md").exists():
+                skill_dirs_in = _category_skill_dirs(install_dir)
+                if skill_dirs_in:
+                    raise ValueError(
+                        f"Refusing to overwrite category directory '{install_dir}' "
+                        f"which contains {len(skill_dirs_in)} skill(s): "
+                        f"{', '.join(sorted(skill_dirs_in))}. "
+                        f"Use a different --name or install into a subcategory."
+                    )
+            shutil.rmtree(install_dir)
 
-    # Warn (but don't block) if SKILL.md is very large
-    skill_md = quarantine_path / "SKILL.md"
-    if skill_md.exists():
-        try:
-            skill_size = skill_md.stat().st_size
-            if skill_size > 100_000:
-                logger.warning(
-                    "Skill '%s' has a large SKILL.md (%s chars). "
-                    "Large skills consume significant context when loaded. "
-                    "Consider asking the author to split it into smaller files.",
-                    safe_skill_name,
-                    f"{skill_size:,}",
-                )
-        except OSError:
-            pass
+        # Warn (but don't block) if SKILL.md is very large
+        skill_md = quarantine_path / "SKILL.md"
+        if skill_md.exists():
+            try:
+                skill_size = skill_md.stat().st_size
+                if skill_size > 100_000:
+                    logger.warning(
+                        "Skill '%s' has a large SKILL.md (%s chars). "
+                        "Large skills consume significant context when loaded. "
+                        "Consider asking the author to split it into smaller files.",
+                        safe_skill_name,
+                        f"{skill_size:,}",
+                    )
+            except OSError:
+                pass
 
-    # Reject symlinks inside the quarantined skill before moving it.
-    # A malicious skill bundle could include a symlink pointing outside the
-    # skills tree; its target contents would then be copied into skills/ and
-    # leaked to the agent on the next skill_view call.
-    for entry in quarantine_path.rglob("*"):
-        if not _is_path_redirect(entry):
-            continue
-        try:
-            rel = entry.relative_to(quarantine_resolved)
-        except ValueError:
-            rel = entry
-        raise ValueError(
-            f"Installed skill contains symlinks, which is not allowed: {rel}"
+        # Reject symlinks inside the quarantined skill before moving it.
+        # A malicious skill bundle could include a symlink pointing outside the
+        # skills tree; its target contents would then be copied into skills/ and
+        # leaked to the agent on the next skill_view call.
+        for entry in quarantine_path.rglob("*"):
+            if not _is_path_redirect(entry):
+                continue
+            try:
+                rel = entry.relative_to(quarantine_resolved)
+            except ValueError:
+                rel = entry
+            raise ValueError(
+                f"Installed skill contains symlinks, which is not allowed: {rel}"
+            )
+
+        install_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(quarantine_path), str(install_dir))
+
+        # Record in lock file
+        lock = HubLockFile()
+        lock.record_install(
+            name=safe_skill_name,
+            source=bundle.source,
+            identifier=bundle.identifier,
+            trust_level=bundle.trust_level,
+            scan_verdict=scan_result.verdict,
+            skill_hash=content_hash(install_dir),
+            install_path=str(install_dir.relative_to(_skills_dir())),
+            files=list(bundle.files.keys()),
+            metadata=bundle.metadata,
+            scan_provenance=scan_provenance or getattr(scan_result, "scan_provenance", None),
         )
 
-    install_dir.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(quarantine_path), str(install_dir))
-
-    # Record in lock file
-    lock = HubLockFile()
-    lock.record_install(
-        name=safe_skill_name,
-        source=bundle.source,
-        identifier=bundle.identifier,
-        trust_level=bundle.trust_level,
-        scan_verdict=scan_result.verdict,
-        skill_hash=content_hash(install_dir),
-        install_path=str(install_dir.relative_to(_skills_dir())),
-        files=list(bundle.files.keys()),
-        metadata=bundle.metadata,
-        scan_provenance=scan_provenance or getattr(scan_result, "scan_provenance", None),
-    )
-
-    append_audit_log(
-        "INSTALL", safe_skill_name, bundle.source,
-        bundle.trust_level, scan_result.verdict,
-        content_hash(install_dir),
-    )
-
-    try:
-        from tools.skill_usage import record_installed
-
-        record_installed(safe_skill_name)
-    except Exception:
-        logger.debug(
-            "Unable to record skill install lifecycle for %s",
-            safe_skill_name,
-            exc_info=True,
+        append_audit_log(
+            "INSTALL", safe_skill_name, bundle.source,
+            bundle.trust_level, scan_result.verdict,
+            content_hash(install_dir),
         )
+
+        try:
+            from tools.skill_usage import record_installed
+
+            record_installed(safe_skill_name)
+        except Exception:
+            logger.debug(
+                "Unable to record skill install lifecycle for %s",
+                safe_skill_name,
+                exc_info=True,
+            )
 
     return install_dir
 

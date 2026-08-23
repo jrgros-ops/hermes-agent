@@ -925,6 +925,7 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
     if err:
         return {"success": False, "error": err}
 
+    # Fast-path duplicate refusal (preserved): early exit before any lock work.
     # Check for name collisions across all directories
     existing = _find_skill(name)
     if existing:
@@ -933,19 +934,37 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
             "error": f"A skill named '{name}' already exists at {existing['path']}."
         }
 
-    # Create the skill directory
+    # Resolve the target path before entering the guard (the guard uses
+    # the canonical path as the lock anchor and target reference).
     skill_dir = _resolve_skill_dir(name, category)
-    skill_dir.mkdir(parents=True, exist_ok=True)
 
-    # Write SKILL.md atomically
-    skill_md = skill_dir / "SKILL.md"
-    atomic_write_text(skill_md, content)
+    # P1 wiring -- A1G: protect the live publish under the shared
+    # normalized-name lock + per-target lock. The guard performs:
+    #   * scan #1 inside global lock (refuses cross-root collisions),
+    #   * scan #2 inside the global+target locked region,
+    #   * canonical/L1 rejection before any mutation,
+    #   * acquisition/release failure classes preserved on refusal.
+    # replacement_policy="new_only" matches the fast-path refusal above;
+    # the guard is the authoritative second line of defence.
+    from tools.skill_publish_guard import live_skill_publish_guard  # lazy import: avoid cycle
 
-    # Security scan — roll back on block
-    scan_error = _security_scan_skill(skill_dir)
-    if scan_error:
-        shutil.rmtree(skill_dir, ignore_errors=True)
-        return {"success": False, "error": scan_error}
+    with live_skill_publish_guard(
+        name,
+        target=skill_dir,
+        replacement_policy="new_only",
+    ):
+        # Create the skill directory
+        skill_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write SKILL.md atomically
+        skill_md = skill_dir / "SKILL.md"
+        atomic_write_text(skill_md, content)
+
+        # Security scan — roll back on block
+        scan_error = _security_scan_skill(skill_dir)
+        if scan_error:
+            shutil.rmtree(skill_dir, ignore_errors=True)
+            return {"success": False, "error": scan_error}
 
     # Extract description from frontmatter for verbose notifications
     _desc = ""

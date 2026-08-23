@@ -1185,17 +1185,40 @@ def restore_skill(skill_name: str) -> Tuple[bool, str]:
 
     src = candidates[0]
     dest = _skills_dir() / skill_name
+    # Fast-path collision refusal (preserved): early exit before any lock work.
     if dest.exists():
         return False, f"destination already exists: {dest}"
 
-    try:
-        src.rename(dest)
-    except OSError:
-        import shutil
+    # P2 wiring -- A1G: protect the live restore under the shared
+    # normalized-name lock + per-target lock. The guard provides:
+    #   * canonical/L1 rejection before any live-tree mutation,
+    #   * scan #2 inside the locked region (authoritative cross-root
+    #     / cross-path collision refusal),
+    #   * acquisition/release failure classes preserved on refusal,
+    #   * source archive is left untouched if the guard refuses.
+    # replacement_policy="new_only" matches the existing destination
+    # existence check above; the guard is the second line of defence.
+    # The rename/move is performed INSIDE the guard body so the
+    # mutation only commits under both locks.
+    from tools.skill_publish_guard import live_skill_publish_guard  # lazy import: avoid cycle
+
+    with live_skill_publish_guard(
+        skill_name,
+        target=dest,
+        replacement_policy="new_only",
+    ):
+        # Guard already verified dest does not exist (new_only); the
+        # dest.exists() check above is the fast-path refusal that
+        # avoids lock acquisition when a collision is already obvious.
         try:
-            shutil.move(str(src), str(dest))
-        except Exception as e:
-            return False, f"failed to restore: {e}"
+            src.rename(dest)
+        except OSError:
+            import shutil
+            try:
+                shutil.move(str(src), str(dest))
+            except Exception as e:
+                # Source archive remains untouched on failure.
+                return False, f"failed to restore: {e}"
 
     # Restoring a pruned built-in lifts its suppression so updates can manage it.
     remove_suppressed_name(skill_name)

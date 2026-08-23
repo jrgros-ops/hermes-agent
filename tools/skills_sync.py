@@ -49,6 +49,11 @@ from hermes_constants import get_bundled_skills_dir, get_hermes_home, get_option
 from agent.skill_utils import is_excluded_skill_path
 from typing import Dict, List, Optional, Set, Tuple
 from utils import atomic_replace
+from tools.skill_publish_guard import (
+    SkillMutationLockAcquireFailure,
+    live_skill_publish_guard,
+    live_skill_repair_guard,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -388,15 +393,41 @@ def restore_official_optional_skill(name: str, *, restore: bool = False) -> dict
                     matches.append(candidate)
 
         if restore:
-            for match in matches:
-                if match.exists():
-                    backed_up.append(_move_to_restore_backup(match, backup_root))
+            # restore=True: wrap backup-of-approved-active + publication of
+            # canonical source + restore mutation inside live_skill_repair_guard.
+            # The canonical name is the skill frontmatter identity; ``folder_name``
+            # is a scan-identity alias. If an unexpected same-name live copy
+            # appears or disappears between repair scans, the guard's between-scan
+            # revalidation fails closed — partial restoration cannot happen.
+            approved_paths: List[Path] = []
+            if dest.exists():
+                approved_paths.append(dest)
+            approved_paths.extend(m for m in matches if m.exists())
+            mutation_paths: List[Path] = [m for m in matches if m.exists()]
             if dest.exists() and not canonical_ok:
-                backed_up.append(_move_to_restore_backup(dest, backup_root))
+                mutation_paths.append(dest)
             if not dest.exists():
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(src, dest)
-                restored.append(folder_name)
+                mutation_paths.append(dest)
+            # Repair scan aliases only — never extra global lock keys.
+            identity_names = tuple(
+                n for n in {folder_name, src_frontmatter} if isinstance(n, str) and n
+            )
+            with live_skill_repair_guard(
+                src_frontmatter,
+                target=dest,
+                approved_existing_paths=approved_paths,
+                mutation_paths=mutation_paths,
+                identity_names=identity_names,
+            ):
+                for match in matches:
+                    if match.exists():
+                        backed_up.append(_move_to_restore_backup(match, backup_root))
+                if dest.exists() and not canonical_ok:
+                    backed_up.append(_move_to_restore_backup(dest, backup_root))
+                if not dest.exists():
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copytree(src, dest)
+                    restored.append(folder_name)
         elif not canonical_ok:
             continue
 
@@ -657,8 +688,16 @@ def _recover_renamed_skill(
                 )
             continue
         try:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(candidate), str(dest))
+            with live_skill_repair_guard(
+                skill_name,
+                target=dest,
+                approved_existing_paths=[candidate],
+                mutation_paths=[candidate, dest],
+            ):
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(candidate), str(dest))
+        except SkillMutationLockAcquireFailure:
+            raise
         except (OSError, IOError):
             logger.warning(
                 "Could not relocate renamed skill %s -> %s", candidate, dest,
@@ -744,9 +783,21 @@ def sync_skills(quiet: bool = False) -> dict:
         _orphan = dest.with_suffix(".bak")
         if _orphan.exists() and not dest.exists():
             try:
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(_orphan), str(dest))
-                logger.info("Recovered orphaned skill backup: %s", _orphan)
+                with live_skill_repair_guard(
+                    skill_name,
+                    target=dest,
+                    # The .bak path's basename ("old-skill.bak") does not match
+                    # the canonical identity, so it is not an "approved
+                    # existing path" in the live tree — approved_existing_paths
+                    # filters to identity matches by scan (#1 below).
+                    approved_existing_paths=[],
+                    mutation_paths=[_orphan, dest],
+                ):
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(_orphan), str(dest))
+                    logger.info("Recovered orphaned skill backup: %s", _orphan)
+            except SkillMutationLockAcquireFailure:
+                raise
             except (OSError, IOError):
                 logger.warning(
                     "Could not recover orphaned skill backup %s", _orphan,
@@ -792,7 +843,13 @@ def sync_skills(quiet: bool = False) -> dict:
             # name differs, so never delete or re-baseline it. Drop the stale
             # manifest entry so the skill isn't later misread as user-deleted.
             if dest.exists() and _dir_hash(dest) == bundled_hash:
-                _rmtree_writable(dest)
+                with live_skill_repair_guard(
+                    skill_name,
+                    target=dest,
+                    approved_existing_paths=[dest],
+                    mutation_paths=[dest],
+                ):
+                    _rmtree_writable(dest)
                 if not quiet:
                     print(f"  ✓ removed stale shadow of {skill_name}")
                 manifest.pop(skill_name, None)
@@ -822,12 +879,19 @@ def sync_skills(quiet: bool = False) -> dict:
                             f"to replace it with the bundled version."
                         )
                 else:
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copytree(skill_src, dest)
-                    copied.append(skill_name)
-                    manifest[skill_name] = bundled_hash
-                    if not quiet:
-                        print(f"  + {skill_name}")
+                    with live_skill_publish_guard(
+                        skill_name,
+                        target=dest,
+                        replacement_policy="new_only",
+                    ):
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copytree(skill_src, dest)
+                        copied.append(skill_name)
+                        manifest[skill_name] = bundled_hash
+                        if not quiet:
+                            print(f"  + {skill_name}")
+            except SkillMutationLockAcquireFailure:
+                raise
             except (OSError, IOError) as e:
                 if not quiet:
                     print(f"  ! Failed to copy {skill_name}: {e}")
@@ -875,36 +939,52 @@ def sync_skills(quiet: bool = False) -> dict:
                     # shutil.move() nest dest *inside* it (or fail outright)
                     # and would poison the restore path below. The current
                     # dest is the authoritative copy — clear the leftover.
-                    if backup.exists():
-                        _rmtree_writable(backup)
-                    shutil.move(str(dest), str(backup))
-                    try:
-                        shutil.copytree(skill_src, dest)
-                        manifest[skill_name] = bundled_hash
-                        updated.append(skill_name)
-                        if not quiet:
-                            print(f"  ↑ {skill_name} (updated)")
-                        # Remove backup after successful copy
-                        try:
-                            _rmtree_writable(backup)
-                        except (OSError, IOError):
-                            logger.debug("Could not remove backup %s", backup, exc_info=True)
-                    except (OSError, IOError):
-                        # Restore from backup. A partially-written dest must
-                        # not shadow the user's copy or block the restore —
-                        # clear it first, then move the backup home.
+                    with live_skill_repair_guard(
+                        skill_name,
+                        target=dest,
+                        # Only paths whose basename matches the canonical
+                        # identity are valid approved existing paths. A
+                        # stale .bak with a non-matching basename (e.g.
+                        # "old-skill.bak") would be flagged as missing
+                        # by the guard's exact-set scan #1 validation.
+                        # mutation_paths is unconditional: dest is always
+                        # a future write target, backup is the sibling the
+                        # current dest may be moved aside to.
+                        approved_existing_paths=[dest] if dest.exists() else [],
+                        mutation_paths=[dest, backup],
+                    ):
                         if backup.exists():
-                            if dest.exists():
-                                try:
-                                    _rmtree_writable(dest)
-                                except (OSError, IOError):
-                                    logger.warning(
-                                        "Could not clear partial copy %s during restore",
-                                        dest, exc_info=True,
-                                    )
-                            if not dest.exists():
-                                shutil.move(str(backup), str(dest))
-                        raise
+                            _rmtree_writable(backup)
+                        shutil.move(str(dest), str(backup))
+                        try:
+                            shutil.copytree(skill_src, dest)
+                            manifest[skill_name] = bundled_hash
+                            updated.append(skill_name)
+                            if not quiet:
+                                print(f"  ↑ {skill_name} (updated)")
+                            # Remove backup after successful copy
+                            try:
+                                _rmtree_writable(backup)
+                            except (OSError, IOError):
+                                logger.debug("Could not remove backup %s", backup, exc_info=True)
+                        except (OSError, IOError):
+                            # Restore from backup. A partially-written dest must
+                            # not shadow the user's copy or block the restore —
+                            # clear it first, then move the backup home.
+                            if backup.exists():
+                                if dest.exists():
+                                    try:
+                                        _rmtree_writable(dest)
+                                    except (OSError, IOError):
+                                        logger.warning(
+                                            "Could not clear partial copy %s during restore",
+                                            dest, exc_info=True,
+                                        )
+                                if not dest.exists():
+                                    shutil.move(str(backup), str(dest))
+                            raise
+                except SkillMutationLockAcquireFailure:
+                    raise
                 except (OSError, IOError) as e:
                     if not quiet:
                         print(f"  ! Failed to update {skill_name}: {e}")
@@ -1056,20 +1136,35 @@ def reset_bundled_skill(name: str, restore: bool = False) -> dict:
                 "synced": None,
             }
         dest = _compute_relative_dest(bundled_by_name[name], bundled_dir)
-        if dest.exists():
-            try:
-                _rmtree_writable(dest)
+        # The destructive live mutation (rmtree of the user's copy at the
+        # canonical dest) is wrapped in live_skill_repair_guard so the
+        # per-target mutation lock + global normalized-name lock are held
+        # during the destructive I/O. manifest writes and the subsequent
+        # sync_skills() rerun happen OUTSIDE the guard — the guard's job
+        # is to serialize the destructive live mutation only, not the
+        # whole reset transaction. Preserve the existing partial-progress
+        # semantics: a guard failure leaves the manifest untouched, the
+        # user's copy intact, and sync_skills() is not invoked.
+        with live_skill_repair_guard(
+            name,
+            target=dest,
+            approved_existing_paths=[dest] if dest.exists() else [],
+            mutation_paths=[dest],
+        ):
+            if dest.exists():
+                try:
+                    _rmtree_writable(dest)
+                except (OSError, IOError) as e:
+                    return {
+                        "ok": False,
+                        "action": "not_reset",
+                        "message": (
+                            f"Could not delete user copy at {dest}: {e}. "
+                            f"Manifest entry preserved — nothing was changed."
+                        ),
+                        "synced": None,
+                    }
                 deleted_user_copy = True
-            except (OSError, IOError) as e:
-                return {
-                    "ok": False,
-                    "action": "not_reset",
-                    "message": (
-                        f"Could not delete user copy at {dest}: {e}. "
-                        f"Manifest entry preserved — nothing was changed."
-                    ),
-                    "synced": None,
-                }
 
     # Step 2: drop the manifest entry so next sync treats it as new
     if in_manifest:

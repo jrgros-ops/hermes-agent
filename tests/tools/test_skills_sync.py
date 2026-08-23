@@ -216,6 +216,9 @@ class TestExternalDirsIndexing:
         stack.enter_context(patch("tools.skills_sync._get_optional_dir", return_value=bundled.parent / "optional-skills"))
         stack.enter_context(patch("tools.skills_sync.SKILLS_DIR", skills_dir))
         stack.enter_context(patch("tools.skills_sync.MANIFEST_FILE", manifest_file))
+        # P6 guard wiring uses _maintenance_duplicate_scan via agent.skill_utils;
+        # patch get_all_skills_dirs so the guard sees the test's skills dir.
+        stack.enter_context(patch("agent.skill_utils.get_all_skills_dirs", return_value=[skills_dir]))
         return stack
 
     def test_shadowed_skill_skipped_and_not_manifested(self, tmp_path):
@@ -282,6 +285,9 @@ class TestRenamedBundledSkillRecovery:
         )
         stack.enter_context(patch("tools.skills_sync.SKILLS_DIR", skills_dir))
         stack.enter_context(patch("tools.skills_sync.MANIFEST_FILE", manifest_file))
+        # P6 guard wiring uses _maintenance_duplicate_scan via agent.skill_utils;
+        # patch get_all_skills_dirs so the guard sees the test's skills dir.
+        stack.enter_context(patch("agent.skill_utils.get_all_skills_dirs", return_value=[skills_dir]))
         return stack
 
     def _skill(self, root, rel, body="# Body\n", name="moved-skill"):
@@ -406,6 +412,9 @@ class TestSyncSkills:
         stack.enter_context(patch("tools.skills_sync._get_optional_dir", return_value=bundled.parent / "optional-skills"))
         stack.enter_context(patch("tools.skills_sync.SKILLS_DIR", skills_dir))
         stack.enter_context(patch("tools.skills_sync.MANIFEST_FILE", manifest_file))
+        # P6 guard wiring uses _maintenance_duplicate_scan via agent.skill_utils;
+        # patch get_all_skills_dirs so the guard sees the test's skills dir.
+        stack.enter_context(patch("agent.skill_utils.get_all_skills_dirs", return_value=[skills_dir]))
         return stack
 
     def test_suppressed_builtin_not_reseeded(self, tmp_path):
@@ -541,6 +550,9 @@ class TestResetBundledSkill:
         stack.enter_context(patch("tools.skills_sync._get_optional_dir", return_value=bundled.parent / "optional-skills"))
         stack.enter_context(patch("tools.skills_sync.SKILLS_DIR", skills_dir))
         stack.enter_context(patch("tools.skills_sync.MANIFEST_FILE", manifest_file))
+        # P5 guard wiring uses _maintenance_duplicate_scan via agent.skill_utils;
+        # patch get_all_skills_dirs so the guard sees the test's skills dir.
+        stack.enter_context(patch("agent.skill_utils.get_all_skills_dirs", return_value=[skills_dir]))
         return stack
 
     def test_reset_clears_stuck_user_modified_flag(self, tmp_path):
@@ -782,7 +794,8 @@ class TestOptOutToggleAndRemove:
              patch("tools.skills_sync._get_optional_dir", return_value=bundled.parent / "optional-skills"), \
              patch("tools.skills_sync.SKILLS_DIR", skills_dir), \
              patch("tools.skills_sync.MANIFEST_FILE", manifest_file), \
-             patch("tools.skills_sync.HERMES_HOME", home):
+             patch("tools.skills_sync.HERMES_HOME", home), \
+             patch("agent.skill_utils.get_all_skills_dirs", return_value=[skills_dir]):
             sync_skills(quiet=True)
             # User edits 'beta'
             (skills_dir / "beta" / "SKILL.md").write_text("---\nname: beta\n---\nEDITED\n")
@@ -830,6 +843,9 @@ class TestUpdateBackupRecovery:
         stack.enter_context(patch("tools.skills_sync._get_optional_dir", return_value=bundled.parent / "optional-skills"))
         stack.enter_context(patch("tools.skills_sync.SKILLS_DIR", skills_dir))
         stack.enter_context(patch("tools.skills_sync.MANIFEST_FILE", manifest_file))
+        # P6 guard wiring uses _maintenance_duplicate_scan via agent.skill_utils;
+        # patch get_all_skills_dirs so the guard sees the test's skills dir.
+        stack.enter_context(patch("agent.skill_utils.get_all_skills_dirs", return_value=[skills_dir]))
         return stack
 
     def _seed_synced_copy(self, skills_dir, manifest_file, text="# Old v1"):
